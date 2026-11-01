@@ -5,18 +5,18 @@ fly_count: 1
 
 roles:
   race:
-    - TELLO-1
+    - "10"
 
 # Which drones tools may connect to when their stick is plugged in.
 quick_connect:
-  - TELLO-1
+  - "10"
 
 # Per-drone calibration identity for cal_and_map. Fill iface/bssid after setup.
 drones:
-  tello_1:
-    iface: null
-    ssid: TELLO-1
-    bssid: null
+  tello_10:
+    iface: "Wi-Fi 2"
+    ssid: "10"
+    bssid: "60:60:1f:aa:6e:3f"
     serial: unsupported
     local_ip: null
-    notes: "Edit after core/tello_dongle_setup.py + nmcli scan"
+    notes: "Dongle 7 (TP-Link 6c:4c:bc:e3:44:fc on Wi-Fi 2) joins TELLO-10. eduroam stays on the built-in radio."

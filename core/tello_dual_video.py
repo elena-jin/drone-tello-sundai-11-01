@@ -8,6 +8,7 @@ so the two streams do not share one socket.
 import json
 import os
 import queue
+import select
 import socket
 import sys
 import threading
@@ -30,7 +31,7 @@ for _p in (DD_ROOT / "core", DD_ROOT / "tools"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from tello_dongle_setup import load_fleet, present_fleet
+from tello_dongle_setup import load_fleet, present_fleet, windows_ipv4
 from tello_tags import TAG_SIZE_M as WORLD_TAG_SIZE_M
 from tello_tags import camera_in_tag, load_map, origin_in_camera
 from tello_policy import (
@@ -88,6 +89,26 @@ FRAME_DT = 1.0 / 30.0
 def dev_socket(iface, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # Windows has no SO_BINDTODEVICE. Binding the stick's Tello address is
+        # what keeps these packets off the built-in radio.
+        ip = ""
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            ip = windows_ipv4(iface)
+            if ip.startswith("192.168.10."):
+                break
+            time.sleep(0.5)
+        if not ip.startswith("192.168.10."):
+            raise SystemExit(f"{iface} has no 192.168.10.x address for port {port}")
+        sock.bind((ip, port))
+        if port == 11111:
+            # One outbound datagram lets Windows treat the camera packets as a reply.
+            try:
+                sock.sendto(b"\x00", ("192.168.10.1", 11111))
+            except OSError:
+                pass
+        return sock
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
     sock.bind(("0.0.0.0", port))
@@ -96,6 +117,8 @@ def dev_socket(iface, port):
 
 def has_tello_lan(iface):
     """True when this dongle has a 192.168.10.x address from a Tello."""
+    if sys.platform == "win32":
+        return windows_ipv4(iface).startswith("192.168.10.")
     import fcntl
     import struct
 
@@ -168,12 +191,16 @@ def listen_state(sock, name, heights, batteries, motion, link, stop):
 def sdk(sock, cmd, timeout=3):
     # Drain buffered replies first so this command reads its own response, not a
     # stale one (fire-and-forget "command" probes can leave replies queued).
-    sock.setblocking(False)
-    try:
-        while True:
+    # select is used instead of a non-blocking recv: on Windows that recv can
+    # stay blocked and never reach streamon.
+    while True:
+        ready, _, _ = select.select([sock], [], [], 0)
+        if not ready:
+            break
+        try:
             sock.recvfrom(256)
-    except (BlockingIOError, OSError):
-        pass
+        except OSError:
+            break
     sock.settimeout(timeout)
     sock.sendto(cmd.encode(), (TELLO, 8889))
     try:
@@ -356,6 +383,7 @@ def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights
     airborne = False
     abort = False
     last_status = 0.0
+    last_stream_try = 0.0
     pids = make_controllers()
     # Training data: one row per control tick -- the action (rc) and the drone's
     # measured motion/state -- to fit an MLP of action -> how the drone moves.
@@ -389,6 +417,18 @@ def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights
                 where = f"waiting for wifi on {iface}" if not wifi else "link quiet, re-entering SDK"
                 print(f"{name} {where}", flush=True)
                 last_mode = mode
+            if wifi and play and (decoder is None or not decoder.is_alive()) and now - last_stream_try > 4:
+                last_stream_try = now
+                entered = sdk(cmd, "command")
+                print(f"{name} command {entered}", flush=True)
+                if entered == "ok":
+                    started = sdk(cmd, "streamon")
+                    print(f"{name} streamon {started}", flush=True)
+                    if started == "ok":
+                        decoder = threading.Thread(
+                            target=decode, args=(name, local_port, frames, stats, stop), daemon=True
+                        )
+                        decoder.start()
             try:
                 send_rc(cmd, (0, 0, 0, 0))  # gentle hold; a brief blip won't trip the failsafe
             except OSError:

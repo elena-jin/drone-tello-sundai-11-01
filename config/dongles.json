@@ -1,5 +1,15 @@
 {
   "description": "USB WiFi dongle -> Tello map. Run: python core/tello_dongle_setup.py",
-  "dongles": [],
-  "updated": null
+  "dongles": [
+    {
+      "number": 7,
+      "iface": "Wi-Fi 2",
+      "mac": "6c:4c:bc:e3:44:fc",
+      "drone": "10",
+      "ssid": "10",
+      "video_port": 17007,
+      "note": "TP-Link Wireless USB Adapter. Dongle 7 joins drone 10."
+    }
+  ],
+  "updated": "2026-11-01T12:57:00-0500"
 }

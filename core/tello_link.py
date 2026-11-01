@@ -18,11 +18,14 @@ import sys
 import time
 from pathlib import Path
 
-from tello_dongle_setup import present_fleet
+from tello_dongle_setup import present_fleet, windows_join
 
 DD_ROOT = Path(__file__).resolve().parent.parent   # repo root
 REPO = DD_ROOT                                       # .venv lives at repo root
-PYTHON = REPO / ".venv" / "bin" / "python"
+if sys.platform == "win32":
+    PYTHON = REPO / ".venv" / "Scripts" / "python.exe"
+else:
+    PYTHON = REPO / ".venv" / "bin" / "python"
 VIDEO = DD_ROOT / "core" / "tello_dual_video.py"
 PERIOD_S = 3
 
@@ -75,7 +78,20 @@ def on_tello_lan(iface):
 
 
 def connect_drone(links, spec):
-    """Join one Tello on its USB dongle. True when that link is up.
+    """Join one Tello on its USB dongle. True when that link is up."""
+    ssid, iface, _profile = spec
+    if sys.platform == "win32":
+        ok = windows_join(iface, ssid)
+        if ok:
+            print(f"{ssid} connected", flush=True)
+        else:
+            print(f"{ssid} joining {iface}", flush=True)
+        return ok
+    return _connect_drone_nm(links, spec)
+
+
+def _connect_drone_nm(links, spec):
+    """Join one Tello with NetworkManager. True when that link is up.
 
     If the dongle already has the Tello LAN, leave it completely alone -- a
     rescan on a flying interface drops the link. Only a dongle that has lost
@@ -107,6 +123,14 @@ def connect_drone(links, spec):
 
 def reap_orphan_engines():
     """Kill any flight engine left over from a previous run (they outlive Ctrl-C)."""
+    if sys.platform == "win32":
+        script = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -like '*tello_dual_video.py*' } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
+        return
     subprocess.run(["pkill", "-f", "tello_dual_video.py"], capture_output=True)
 
 
@@ -116,7 +140,12 @@ def start_engine(names, play):
         args.append("--no_fly")
     args.extend(names)
     print(f"start flight engine for {' '.join(names)}{' (play, no takeoff)' if play else ''}", flush=True)
-    return subprocess.Popen(args, cwd=DD_ROOT, start_new_session=True)
+    popen_kwargs = {"cwd": DD_ROOT}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    return subprocess.Popen(args, **popen_kwargs)
 
 
 def main():
@@ -137,12 +166,19 @@ def main():
             if not fleet:
                 fleet = specs
                 print("fleet:", " ".join(ssid for ssid, _iface, _profile in fleet), flush=True)
+            # On Windows the sockets bind to the stick's 192.168.10 address, so the
+            # engine starts only after that address exists. Linux binds the device
+            # itself and can come up while the join is still in progress.
+            connected = []
+            links = {} if sys.platform == "win32" else device_links()
+            for spec in fleet:
+                connected.append(connect_drone(links, spec))
+            if sys.platform == "win32" and not all(connected):
+                time.sleep(max(0, PERIOD_S - (time.time() - started)))
+                continue
             # Own exactly one engine: (re)start it if it isn't running.
             if engine is None or engine.poll() is not None:
                 engine = start_engine([ssid for ssid, _iface, _profile in fleet], play)
-            connected = []
-            for spec in fleet:
-                connected.append(connect_drone(device_links(), spec))
             cycle += 1
             if all(connected) and (cycle == 1 or cycle % 5 == 0):
                 print("all drones connected:", " ".join(s[0] for s in fleet), flush=True)
@@ -150,7 +186,10 @@ def main():
     finally:
         if engine is not None and engine.poll() is None:
             try:
-                os.killpg(os.getpgid(engine.pid), signal.SIGTERM)
+                if sys.platform == "win32":
+                    engine.terminate()
+                else:
+                    os.killpg(os.getpgid(engine.pid), signal.SIGTERM)
                 print("stopped flight engine", flush=True)
             except OSError:
                 engine.terminate()
